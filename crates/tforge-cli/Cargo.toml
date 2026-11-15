@@ -1,0 +1,13 @@
+[package]
+name = "tforge-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tforge"
+path = "src/main.rs"
+
+[dependencies]
+terra-core = { path = "../terra-core" }
+terra-assets = { path = "../terra-assets" }

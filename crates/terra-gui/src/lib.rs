@@ -1325,15 +1325,23 @@ impl App {
             });
             ui.separator();
 
-            egui::ScrollArea::vertical()
-                .id_salt("main")
-                .show(ui, |ui| match self.tab {
-                    Tab::Inventory => self.tab_inventory(ui),
-                    Tab::Banks => self.tab_banks(ui),
-                    Tab::Buffs => self.tab_buffs(ui),
-                    Tab::Journey => self.tab_journey(ui),
-                    Tab::Raw => self.tab_raw(ui),
-                });
+            // Journey owns its scroll area: the list is virtualised over 5,000+
+            // rows and must fill the remaining height, which a nested ScrollArea
+            // inside the generic "main" one cannot do (the outer one gives its
+            // children unbounded height).
+            if self.tab == Tab::Journey {
+                self.tab_journey(ui);
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt("main")
+                    .show(ui, |ui| match self.tab {
+                        Tab::Inventory => self.tab_inventory(ui),
+                        Tab::Banks => self.tab_banks(ui),
+                        Tab::Buffs => self.tab_buffs(ui),
+                        Tab::Journey => unreachable!("handled above"),
+                        Tab::Raw => self.tab_raw(ui),
+                    });
+            }
         });
     }
 
@@ -1565,10 +1573,15 @@ impl App {
             .map(|i| i.id)
             .collect();
         let total = ids.len();
-        let mut complete: Option<(String, i32)> = None;
+        // Any edit, from the DragValue or the Complete button, is applied after
+        // the list is drawn: the closure below only has immutable access to the
+        // player, which keeps the borrow checker happy and the update atomic.
+        let mut edit: Option<(String, i32)> = None;
         egui::ScrollArea::vertical()
             .id_salt("journey")
-            .max_height(460.0)
+            // Fill the panel instead of shrinking to the widest row: a 300 px
+            // list in a 1,200 px pane looks broken and wastes the row space.
+            .auto_shrink([false, false])
             .show_rows(ui, 22.0, total, |ui, range| {
                 for idx in range {
                     let Some(item) = self.db.by_id(ids[idx]) else {
@@ -1583,7 +1596,21 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_sized([200.0, 18.0], egui::Label::new(&item.name).truncate());
                         ui.label(RichText::new(format!("#{}", item.id)).weak().small());
-                        ui.label(format!("{current}/{}", item.research_goal));
+                        // Editable exact progress: 0..=goal. Typing 0 removes the
+                        // entry entirely (see operations::research_item).
+                        let mut value = current;
+                        let edited = ui
+                            .add_sized(
+                                [64.0, 18.0],
+                                egui::DragValue::new(&mut value)
+                                    .speed(1)
+                                    .range(0..=item.research_goal),
+                            )
+                            .changed();
+                        ui.label(RichText::new(format!("/ {}", item.research_goal)).weak());
+                        if edited {
+                            edit = Some((item.pid.clone(), value));
+                        }
                         if current >= item.research_goal {
                             ui.label(
                                 RichText::new("✓ done").color(Color32::from_rgb(130, 200, 130)),
@@ -1593,14 +1620,14 @@ impl App {
                             .on_hover_text("Research this item to its goal")
                             .clicked()
                         {
-                            complete = Some((item.pid.clone(), item.research_goal));
+                            edit = Some((item.pid.clone(), item.research_goal));
                         }
                     });
                 }
             });
-        if let Some((pid, goal)) = complete {
+        if let Some((pid, count)) = edit {
             if let Some(p) = &mut self.player {
-                operations::research_item(p, &pid, goal);
+                operations::research_item(p, &pid, count);
                 self.dirty = true;
             }
         }

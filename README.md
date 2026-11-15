@@ -32,9 +32,9 @@ can reproduce byte for byte.**
   class or slot; typing switches to fuzzy search.
 * **Character sheet** — name, difficulty, life/mana, all permanent upgrades (including the
   six 1.4.4 boosters), hair and seven colours.
-* **Journey mode** — research is editable: filter the catalogue, complete one item at a
-  time, or research everything with a known goal in one click. Buffs are editable slot by
-  slot.
+* **Journey mode** — research is editable: filter the catalogue, set any item's exact
+  progress, complete one item at a time, or research everything with a known goal in one
+  click. Buffs are editable slot by slot.
 * **Adjustable UI** — zoom 0.8–2.0 and slot size, remembered between runs.
 * **Backups** — every save first copies the old file to `<name>.plr.bak`.
 

@@ -185,6 +185,12 @@ pub fn research_item(p: &mut PlayerFile, pid: &str, goal: i32) {
     if pid.is_empty() {
         return;
     }
+    // Setting a count to zero means "not researched at all". Leaving a `pid -> 0`
+    // entry behind would grow the save's research list with dead entries.
+    if goal <= 0 {
+        p.research.retain(|(k, _)| k != pid);
+        return;
+    }
     match p.research.iter_mut().find(|(k, _)| k == pid) {
         Some((_, count)) => *count = goal,
         None => p.research.push((pid.to_string(), goal)),
@@ -419,6 +425,8 @@ mod tests {
         research_item(&mut p, "Zenith", 5);
         assert_eq!(p.research.len(), 1, "one entry per item");
         assert_eq!(p.research[0].1, 5);
+        research_item(&mut p, "Zenith", 0);
+        assert!(p.research.is_empty(), "zero removes the entry");
 
         // A bogus-but-higher count must survive a full learn pass.
         p.research.push(("DirtBlock".into(), 99_999));

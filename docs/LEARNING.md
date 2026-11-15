@@ -285,7 +285,36 @@ with `show_rows`, so only visible rows cost anything.
 
 ---
 
-## 8. Exercises, if you want to change something
+## 8. Item sprites: what an XNB is
+
+`crates/terra-assets/src/sprites.rs`
+
+Terraria stores each item's artwork as `Content/Images/Item_<id>.xnb`, an XNA content file:
+
+```
+'X' 'N' 'B' 'w'  version(u8)  flags(u8)  fileSize(u32)
+compressed?  decompressedSize(u32) then payload
+```
+
+`flags & 0x80` means LZX-compressed, and the payload has a framing that is not part of the
+LZX spec: every 32 KiB chunk is preceded by a big-endian length, and chunks whose first byte
+is `0xFF` also carry their uncompressed length. After decompression you get the ordinary XNB
+object graph — a type-reader table, then a `Texture2D` with surface format, width, height,
+mip count and pixel data. Terraria always writes surface format 0 (straight RGBA8, one mip),
+which is why the buffer can go straight to the GPU (`ColorImage::from_rgba_unmultiplied`).
+
+Two decisions in the GUI are worth understanding:
+
+* **Decode on demand, not up front.** All 6,134 vanilla sprites decode in ~0.3 s total, about
+  0.05 ms each, so a lazy per-slot decode beats any import step. `SpriteCache` in
+  `crates/terra-gui/src/lib.rs` keeps the textures actually on screen and evicts the rest;
+  misses are cached too, so a missing file is never re-read per frame.
+* **Never upscale, boost only integers.** Drawing 1:1 is what the game does and it keeps
+  pixel art crisp; but a 12 px coin would vanish in a 48 px slot, so sprites smaller than
+  half the slot get an integer 2×. That rule is why coins and dirt blocks stay readable
+  without swords looking blurry.
+
+## 9. Exercises, if you want to change something
 
 Each of these is a real, contained task:
 
@@ -297,13 +326,13 @@ Each of these is a real, contained task:
    multi/favourite rules disagree with the parser.
 3. **Add an item category.** Add a `mask_` function in `catalog.rs` and a pill in
    `side_right`. The tests assert that every item lands in exactly one group.
-4. **Decode sprites.** `Content/Images/Item_<id>.xnb` are XNB containers with LZX-compressed
-   atlases. That is a self-contained job: parse the XNB header, decode, crop per item, cache
-   in `~/.cache/terra-forge/`. `terra_gui::theme` is where the fallback colours live today.
+4. **Animated sprite frames.** Some item sheets hold several frames side by side (swinging
+   weapons). `Sprite` currently uses the whole image; splitting it into frames and cycling
+   them on hover would be a contained project — start in `sprites::decode_xnb`.
 
 ---
 
-## 9. Debugging recipes
+## 10. Debugging recipes
 
 * **"string length 18446744073709551615"** — you read a 7-bit length where there was none;
   your cursor is misaligned. Print the offset.

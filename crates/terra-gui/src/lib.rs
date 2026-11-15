@@ -100,6 +100,54 @@ struct Drag {
     item: Slot,
 }
 
+/// Lazily decoded item sprites, held as GPU textures in a small LRU cache.
+///
+/// Decoding a single `.xnb` costs about 0.05 ms (see `terra_assets::sprites`), so
+/// there is no pre-pass: a sprite is decoded the first time a slot showing it is
+/// drawn on screen. Only a few hundred are ever live at once, and misses are
+/// cached too so a missing file is not re-read every frame.
+struct SpriteCache {
+    /// `None` means "looked for it, there is no sprite for this id".
+    textures: std::collections::HashMap<i32, Option<egui::TextureHandle>>,
+    order: std::collections::VecDeque<i32>,
+    cap: usize,
+}
+
+impl SpriteCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            textures: Default::default(),
+            order: Default::default(),
+            cap,
+        }
+    }
+
+    fn get(&mut self, ctx: &egui::Context, id: i32) -> Option<egui::TextureHandle> {
+        if let Some(hit) = self.textures.get(&id) {
+            return hit.clone();
+        }
+        let handle = match terra_assets::sprites::load_item_sprite(id) {
+            Ok(Some(sprite)) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [sprite.width as usize, sprite.height as usize],
+                    &sprite.rgba,
+                );
+                // Nearest filtering: pixel art must not be blurred.
+                Some(ctx.load_texture(format!("item-{id}"), image, egui::TextureOptions::NEAREST))
+            }
+            _ => None,
+        };
+        self.textures.insert(id, handle.clone());
+        self.order.push_back(id);
+        while self.order.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.textures.remove(&old);
+            }
+        }
+        handle
+    }
+}
+
 pub struct App {
     db: &'static terra_assets::ItemDb,
     settings: UiSettings,
@@ -128,6 +176,7 @@ pub struct App {
 
     show_settings: bool,
     hovered_item: Option<i32>,
+    sprites: SpriteCache,
 }
 
 impl App {
@@ -156,6 +205,7 @@ impl App {
             players: Vec::new(),
             show_settings: false,
             hovered_item: None,
+            sprites: SpriteCache::new(600),
         };
         app.rebuild_catalog();
         app.rescan();
@@ -706,27 +756,49 @@ impl App {
             ui.painter()
                 .rect_filled(rect, 2.0, Color32::from_rgb(42, 46, 56));
         }
-        let icon = egui::Rect::from_min_size(rect.min + Vec2::new(2.0, 2.0), Vec2::splat(20.0));
+        let icon = egui::Rect::from_min_size(rect.min + Vec2::new(2.0, 1.0), Vec2::splat(22.0));
         ui.painter()
             .rect_filled(icon, 2.0, Color32::from_rgb(34, 37, 46));
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(icon.min, Vec2::new(2.0, icon.height())),
-            1.0,
-            rarity_color(item.rarity),
-        );
-        let initials: String = item
-            .name
-            .split_whitespace()
-            .take(2)
-            .map(|w| w.chars().next().unwrap_or('?'))
-            .collect();
-        ui.painter().text(
-            icon.center(),
-            egui::Align2::CENTER_CENTER,
-            initials,
-            egui::FontId::proportional(9.0),
-            rarity_color(item.rarity),
-        );
+        let sprite = if self.settings.sprites {
+            self.sprites.get(ui.ctx(), item.id)
+        } else {
+            None
+        };
+        match sprite {
+            Some(texture) => {
+                let native = texture.size_vec2();
+                let max_side = native.x.max(native.y);
+                let fit = (icon.width() - 2.0) / max_side;
+                let scale = if fit >= 2.0 { 2.0 } else { fit.min(1.0) };
+                let target = egui::Rect::from_center_size(icon.center(), native * scale);
+                ui.painter().image(
+                    texture.id(),
+                    target,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            None => {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(icon.min, Vec2::new(2.0, icon.height())),
+                    1.0,
+                    rarity_color(item.rarity),
+                );
+                let initials: String = item
+                    .name
+                    .split_whitespace()
+                    .take(2)
+                    .map(|w| w.chars().next().unwrap_or('?'))
+                    .collect();
+                ui.painter().text(
+                    icon.center(),
+                    egui::Align2::CENTER_CENTER,
+                    initials,
+                    egui::FontId::proportional(9.0),
+                    rarity_color(item.rarity),
+                );
+            }
+        }
         ui.painter().text(
             rect.min + Vec2::new(26.0, 12.0),
             egui::Align2::LEFT_CENTER,
@@ -1092,33 +1164,80 @@ impl App {
 
         if !slot.is_empty() {
             let rarity = self.db.by_id(slot.net_id).map(|i| i.rarity).unwrap_or(0);
-            painter.rect_filled(
-                rect.shrink(4.0),
-                2.0,
-                rarity_color(rarity).linear_multiply(0.85),
-            );
-            let initials: String = self
-                .db
-                .display_name(slot.net_id)
-                .split_whitespace()
-                .take(2)
-                .map(|w| w.chars().next().unwrap_or('?'))
-                .collect();
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                initials,
-                egui::FontId::proportional(cell * 0.30),
-                Color32::from_black_alpha(200),
-            );
+            let sprite = if self.settings.sprites {
+                self.sprites.get(ui.ctx(), slot.net_id)
+            } else {
+                None
+            };
+
+            match sprite {
+                Some(texture) => {
+                    // Draw at native size: upscaling a 16 px coin to fill a 48 px
+                    // slot is what makes sprite grids look wrong. Only oversized
+                    // art is scaled down, keeping pixel alignment.
+                    let native = texture.size_vec2();
+                    let room = cell - 8.0;
+                    let max_side = native.x.max(native.y);
+                    // Large art shrinks to fit; tiny art (coins, blocks, torches)
+                    // gets an integer 2x so it does not vanish, which keeps every
+                    // pixel on the grid. Anything in between stays native size.
+                    let fit = room / max_side;
+                    let scale = if fit >= 2.0 { 2.0 } else { fit.min(1.0) };
+                    let target = egui::Rect::from_center_size(rect.center(), native * scale);
+                    painter.image(
+                        texture.id(),
+                        target,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    // Rarity stays visible, but as a quiet 2 px strip instead of a
+                    // background wash that would fight the artwork.
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left() + 3.0, rect.bottom() - 5.0),
+                            egui::pos2(rect.right() - 3.0, rect.bottom() - 3.0),
+                        ),
+                        1.0,
+                        rarity_color(rarity),
+                    );
+                }
+                None => {
+                    // Fallback: rarity tile with initials, as before.
+                    painter.rect_filled(
+                        rect.shrink(4.0),
+                        2.0,
+                        rarity_color(rarity).linear_multiply(0.85),
+                    );
+                    let initials: String = self
+                        .db
+                        .display_name(slot.net_id)
+                        .split_whitespace()
+                        .take(2)
+                        .map(|w| w.chars().next().unwrap_or('?'))
+                        .collect();
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        initials,
+                        egui::FontId::proportional(cell * 0.30),
+                        Color32::from_black_alpha(200),
+                    );
+                }
+            }
+
             if slot.stack > 1 && multi {
+                // Shadow first, then the number: stacks stay readable on bright art.
+                let text = slot.stack.to_string();
+                let pos = rect.max - Vec2::new(3.0, 2.0);
+                let font = egui::FontId::proportional(cell * 0.24);
                 painter.text(
-                    rect.max - Vec2::new(3.0, 2.0),
+                    pos + Vec2::new(1.0, 1.0),
                     egui::Align2::RIGHT_BOTTOM,
-                    slot.stack.to_string(),
-                    egui::FontId::proportional(cell * 0.24),
-                    Color32::WHITE,
+                    &text,
+                    font.clone(),
+                    Color32::from_black_alpha(220),
                 );
+                painter.text(pos, egui::Align2::RIGHT_BOTTOM, &text, font, Color32::WHITE);
             }
             if slot.favorited {
                 painter.text(
@@ -1439,6 +1558,32 @@ impl App {
                         )
                         .changed();
                 });
+                ui.add_space(6.0);
+                changed |= ui
+                    .checkbox(&mut self.settings.sprites, "Item sprites")
+                    .on_hover_text(
+                        "Draw real item artwork decoded from your Terraria installation.\n                         Turn this off for the plain rarity tiles.",
+                    )
+                    .changed();
+                match terra_assets::sprites::item_dir() {
+                    Some(dir) => {
+                        ui.label(
+                            RichText::new(format!("art from {}", dir.display()))
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(
+                                "no Terraria install found — using rarity tiles.\n\
+                                 Set TFORGE_CONTENT to a Content/Images directory to override.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    }
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Reset").clicked() {
                         self.settings = UiSettings::default();

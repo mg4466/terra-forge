@@ -19,6 +19,9 @@ can reproduce byte for byte.**
 * **Drag and drop** — pick an item up in one slot and drop it in another to swap; drag an
   item out of the browser onto a slot to add it. Right-click gives a menu (max stack,
   favourite, duplicate, clear), the mouse wheel adjusts stacks, middle-click duplicates.
+* **Real item artwork** — sprites are decoded from your own game files, so slots show the
+  actual Terraria art. Without an installed game (or with the toggle off) you get
+  rarity-coloured tiles instead.
 * **Item browser** — 6,196 items with names, ids, rarity, stack limits and tooltips.
   Grouped into sections (weapons, armor, accessories, blocks, …) and subdivided by damage
   class or slot; typing switches to fuzzy search.
@@ -122,8 +125,16 @@ two scripts in `tools/`:
   research goals) and writes the embedded JSON.
 
 Max stack and rarity only exist inside the game's compiled code, so items newer than the
-snapshot keep their real name and get "estimated" stats shown as such in the browser. To
-refresh after a game update:
+snapshot keep their real name and get "estimated" stats shown as such in the browser.
+
+Item artwork comes from the same install: `Content/Images/Item_<id>.xnb` are XNA content
+containers, LZX-compressed with a per-chunk length prefix on top. Decoding one costs about
+0.05 ms, so the editor decodes a sprite the first time it is drawn and keeps the result in a
+small GPU cache — no import step, no atlas file, and art that always matches your game
+version. Large sprites are shrunk to fit a slot, tiny ones (coins, blocks, torches) get an
+integer 2× so they stay recognisable.
+
+To refresh the database after a game update:
 
 ```sh
 pip install dnfile
@@ -134,12 +145,13 @@ cargo build --release
 
 ## Limitations
 
-* Item sprites are not decoded yet — `Content/Images/*.xnb` are LZX-compressed. Slots show
-  rarity-coloured tiles with initials instead.
 * No `.tplr` (tModLoader) support; those files are a different, older format.
 * One character at a time — no side-by-side transfer pane.
 * Journey-mode creative powers are preserved but not editable; research is read-only.
 * Editing a character that the game currently has open will be overwritten by the game.
+* Sprites need an installed copy of Terraria. It is looked for in the standard Steam, GOG
+  and tModLoader locations; set `TFORGE_CONTENT=/path/to/Content/Images` if yours is
+  somewhere else. The Display panel has a toggle if you prefer plain tiles.
 
 ## Documentation
 

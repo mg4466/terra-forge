@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
+pub mod sprites;
+
 pub const DB_JSON: &str = include_str!("../data/items.json");
 
 #[derive(Debug, Clone, Deserialize)]

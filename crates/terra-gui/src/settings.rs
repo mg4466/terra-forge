@@ -17,13 +17,17 @@ pub struct UiSettings {
     pub zoom: f32,
     /// Slot cell size in points, before zoom.
     pub cell_size: f32,
+    /// Draw real item sprites decoded from the installed game.
+    /// Turning this off restores the plain rarity tiles.
+    pub sprites: bool,
 }
 
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
-            zoom: 1.15,
-            cell_size: 46.0,
+            zoom: 1.25,
+            cell_size: 48.0,
+            sprites: true,
         }
     }
 }
@@ -79,6 +83,7 @@ mod tests {
         let s = UiSettings {
             zoom: 99.0,
             cell_size: 1.0,
+            sprites: true,
         }
         .clamped();
         assert_eq!(s.zoom, 2.5);

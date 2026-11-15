@@ -149,7 +149,7 @@ fn supersections() -> &'static [(&'static str, u32)] {
     CACHE.get_or_init(|| {
         vec![
             ("Weapons", mask_weapons()),
-            ("Armour", mask_armour()),
+            ("Armor", mask_armour()),
             ("Accessories", mask_accessory()),
             ("Vanity, pets & mounts", mask_vanity()),
             ("Blocks & furniture", mask_blocks() | mask_furniture()),
@@ -174,8 +174,8 @@ fn subsections(cat: u32) -> Vec<(&'static str, u32)> {
     } else if cat == mask_armour() {
         vec![
             ("Helmets", tag_bit("HeadSlot")),
-            ("Body armour", tag_bit("BodySlot")),
-            ("Leg armour", tag_bit("LegsSlot")),
+            ("Body armor", tag_bit("BodySlot")),
+            ("Leg armor", tag_bit("LegsSlot")),
         ]
     } else if cat == mask_blocks() | mask_furniture() {
         vec![
@@ -191,7 +191,7 @@ fn subsections(cat: u32) -> Vec<(&'static str, u32)> {
         ]
     } else if cat == mask_vanity() {
         vec![
-            ("Vanity armour", tag_bit("Vanity")),
+            ("Vanity armor", tag_bit("Vanity")),
             ("Mounts & minecarts", tag_bit("Mount") | tag_bit("Minecart")),
             ("Pets", tag_bit("VanityPet") | tag_bit("LightPet")),
             ("Hooks & kites", tag_bit("Hook") | tag_bit("Kite")),
@@ -258,7 +258,7 @@ mod tests {
         for id in ids(&cat) {
             assert!(
                 db().by_id(id).unwrap().tags & mask != 0,
-                "{id} is not armour"
+                "{id} is not armor"
             );
         }
         assert!(headers(&cat).contains(&"Helmets"), "{:?}", headers(&cat));

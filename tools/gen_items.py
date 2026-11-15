@@ -49,6 +49,13 @@ PREFIX_NAMES = {
 }
 
 
+def split_pid(pid: str) -> str:
+    """`FirstFractal` -> `First Fractal`; leaves all-lowercase ids alone."""
+    import re
+    words = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", pid)
+    return words.replace("_", " ").strip()
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -74,8 +81,11 @@ def main() -> None:
         pid = items_by_id.get(iid) or src.get("pid") or ""
         name = names.get(pid) or src.get("name") or ""
         if not name:
+            # A few ids have no entry in the game's own Items.json (unused or
+            # debug items). Fall back to the persistent id read as words:
+            # "FirstFractal" -> "First Fractal", which is usually the real name.
             unnamed += 1
-            name = f"Item #{iid}"
+            name = split_pid(pid) if pid else f"Item #{iid}"
         est = iid >= len(snap_items)
         if est:
             estimated += 1

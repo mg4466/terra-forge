@@ -879,7 +879,7 @@ impl App {
                 Ct::StoredL(lo - 1, Group::Dyes),
             )
         };
-        self.section(ui, "Armour & accessories", items);
+        self.section(ui, "Armor & accessories", items);
         self.section(ui, "Vanity", social);
         self.section(ui, "Dyes", dyes);
         self.section(ui, "Main inventory", Ct::Bag(Bag::Inv));

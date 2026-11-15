@@ -30,7 +30,7 @@ WAYLAND_DISPLAY=wayland-1 ./target/release/terra-forge
 * `docs/LEARNING.md` — a guided tour of the code: how the crypto works, how the parser
   walks the bytes, why the round-trip proof is possible, how the UI is structured, and
   four exercises if you want to extend it.
-* `../tforge.md` — the format specification and the corrections made to the original draft.
+* `SPEC.md` — the format specification and the corrections made to the original draft.
 * `issues.md` — UI concerns raised after the first build, and what was done about each.
 
 ## Headless verification
@@ -61,7 +61,7 @@ of being guessed at.
 
 ## Format
 
-See `../tforge.md` for the field-by-field layout, the per-container encoding table, and a
+See `SPEC.md` for the field-by-field layout, the per-container encoding table, and a
 list of corrections to the original spec draft. Short version:
 
 * AES-128-CBC, key == IV == UTF-16LE of `h3y_gUyZ`, PKCS#7 padding, one stream.

@@ -25,6 +25,14 @@ If a Wayland session matters (`eframe` picks the backend itself):
 WAYLAND_DISPLAY=wayland-1 ./target/release/terra-forge
 ```
 
+## Documentation
+
+* `docs/LEARNING.md` — a guided tour of the code: how the crypto works, how the parser
+  walks the bytes, why the round-trip proof is possible, how the UI is structured, and
+  four exercises if you want to extend it.
+* `../tforge.md` — the format specification and the corrections made to the original draft.
+* `issues.md` — UI concerns raised after the first build, and what was done about each.
+
 ## Headless verification
 
 ```sh
@@ -100,18 +108,32 @@ That is why they come from a snapshot rather than from the install; see tforge.m
 * Dual-character transfer pane, sprite tooltips, restoring a `.bak` from inside the app,
   editing Journey creative powers (they are preserved verbatim, not edited), editing the
   research dictionary beyond appending.
-* Drag-and-drop by mouse-drag: pick-and-place (click item in browser → click slot),
-  right-click "pick up", and middle-click duplicate cover the workflow.
+* Dual-character transfer pane (drag between two open players).
+* Grouping items by progression tier rather than by type (needs a tier source we lack).
+* Sprite tooltips; restoring a `.bak` from inside the app.
 
 ## Keyboard / mouse
 
 | action | effect |
 |---|---|
 | Ctrl+S | save (with backup) |
+| drag slot → slot | swap the two items |
+| drag item from browser → slot | add/copy that item into the slot |
 | click slot | select it |
-| click slot while holding an item | place it (moving if it was picked up) |
+| click slot while dragging | drop onto it |
 | right-click slot | pick up / duplicate / max stack / favourite / clear |
 | middle-click slot | duplicate that item onto the cursor |
-| double-click slot | pick it up |
 | wheel over slot | ±1 stack (Shift: ±100) |
 | click item in browser | place in the selected slot, or hold it if nothing is selected |
+| `Aa` in the top bar | zoom 0.8–2.0 and slot size, persisted to `~/.config/terra-forge/settings.json` |
+
+Grids keep Terraria's 10-wide layout by shrinking cells when the window is narrow, and only
+wrap into fewer columns when cells would become unreadable.
+
+## Item browser
+
+Browsing (empty search) groups items into section headers — WEAPONS, ARMOUR, ACCESSORIES,
+VANITY/PETS/MOUNTS, BLOCKS & FURNITURE, CONSUMABLES & AMMO, MATERIALS, OTHER — each sorted by
+rarity then name. Selecting a category pill subdivides further (Weapons → Melee / Ranged /
+Magic / Summon / Sentry; Armour → Helmets / Body / Legs; Blocks → Blocks / Walls /
+Paintings). Typing switches to a flat relevance-ranked list.

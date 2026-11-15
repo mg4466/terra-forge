@@ -27,7 +27,7 @@ pub enum CryptoError {
 
 /// Decrypt a `.plr` byte stream, stripping PKCS#7 padding.
 pub fn decrypt(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if data.is_empty() || data.len() % BLOCK != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(BLOCK) {
         return Err(CryptoError::NotBlockAligned(data.len()));
     }
     let mut buf = data.to_vec();

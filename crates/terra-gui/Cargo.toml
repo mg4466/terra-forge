@@ -12,3 +12,5 @@ path = "src/main.rs"
 terra-core = { path = "../terra-core" }
 terra-assets = { path = "../terra-assets" }
 eframe = "0.37"
+serde.workspace = true
+serde_json.workspace = true

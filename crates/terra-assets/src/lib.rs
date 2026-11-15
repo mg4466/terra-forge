@@ -163,9 +163,10 @@ impl ItemDb {
     }
 
     pub fn display_name(&self, id: i32) -> String {
-        match self.by_id(id) {
-            Some(it) if !it.name.is_empty() => it.name.clone(),
-            _ => format!("Item #{id}"),
+        if let Some(it) = self.by_id(id).filter(|it| !it.name.is_empty()) {
+            it.name.clone()
+        } else {
+            format!("Item #{id}")
         }
     }
 
@@ -241,15 +242,11 @@ fn match_score(q: &str, it: &Item) -> Option<i32> {
             .iter()
             .position(|c| *c == qc)
             .map(|i| i + start);
-        match found {
-            Some(i) => {
-                if let Some(l) = last {
-                    gaps += (i - l - 1) as i32;
-                }
-                last = Some(i);
-            }
-            None => return None,
+        let i = found?;
+        if let Some(l) = last {
+            gaps += (i - l - 1) as i32;
         }
+        last = Some(i);
     }
     Some(300 + gaps)
 }
@@ -273,7 +270,7 @@ mod tests {
     fn search_ranks_prefix_matches_first() {
         let db = ItemDb::embedded();
         let hits = db.search("terra blade", 0);
-        assert!(hits.len() >= 1);
+        assert!(!hits.is_empty());
         assert_eq!(hits[0].name, "Terra Blade");
     }
 

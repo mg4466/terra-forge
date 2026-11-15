@@ -241,12 +241,18 @@ self.central(ui);      // fills whatever is left
 **Transient state must be stored.** A drag in progress is not remembered by egui between
 frames, so `App::drag: Option<Drag>` holds it.
 
+**Order of input handling matters.** Clearing a drag when the pointer is released *at the top
+of the frame* looks harmless and silently breaks every drop: the release is consumed before
+the slots are drawn, so no slot ever sees a drag on its release frame. The cancel-on-release
+check therefore runs at the *end* of `ui()`, after the slots had their chance. Escape and
+right-click cancels run at the top, because those are unambiguous.
+
 ### Drag and drop, as a state machine
 
 ```
-drag_started()  → App::drag = Some(Drag { from: Some(slot), item })
+drag_started()  → App::drag = Some(Drag { side, from: Some(slot), item })
 pointer released over slot X
-                → operations::drop_item(db, player, X, from, item)
+                → operations::drop_item / transfer_item
                 → App::drag = None
 pointer released over nothing
                 → App::drag = None   (cancel)
@@ -255,6 +261,19 @@ pointer released over nothing
 `Drag::from` is `None` when the item came from the browser, which turns a drop into a copy
 instead of a swap. Painting follows the pointer through a tooltip-layer painter
 (`App::drag_ghost`), which is how the game does it too.
+
+### One model, two characters
+
+Stash mode is the same drag machine with one more dimension. A `SlotRef` only says
+*container + index*, so `Side::{Primary, Stash}` is carried alongside it — in `Drag` and in
+`App::selected_side`. `App::player_of(side)` / `player_mut(side)` are the only places that
+decide which `PlayerFile` a reference means; every drawing and editing routine takes a
+`Side` instead of reading `self.player` directly.
+
+Cross-character moves go through `operations::transfer_item(src, dst, ...)`, which takes two
+players because Rust will not let you borrow one `PlayerFile` mutably twice. Same-character
+moves keep using `drop_item`. Both implement the same swap-or-copy rule, and both are unit
+tested, so the "drop onto the stash" path is not special-cased UI code.
 
 ### Why the edit operations are free functions
 
@@ -308,11 +327,19 @@ Two decisions in the GUI are worth understanding:
 * **Decode on demand, not up front.** All 6,134 vanilla sprites decode in ~0.3 s total, about
   0.05 ms each, so a lazy per-slot decode beats any import step. `SpriteCache` in
   `crates/terra-gui/src/lib.rs` keeps the textures actually on screen and evicts the rest;
-  misses are cached too, so a missing file is never re-read per frame.
+  misses are cached too, so a missing file is never re-read per frame. Eviction is true LRU —
+  a cache hit is *promoted* to the back of the queue — because a plain insertion-ordered
+  queue turns scrolling the 6,196-item catalogue into an eviction machine that throws away
+  the sprites of the equipped gear on screen.
 * **Never upscale, boost only integers.** Drawing 1:1 is what the game does and it keeps
   pixel art crisp; but a 12 px coin would vanish in a 48 px slot, so sprites smaller than
   half the slot get an integer 2×. That rule is why coins and dirt blocks stay readable
   without swords looking blurry.
+* **One frame, not the whole sheet.** Animated items are vertical strips: a soul's texture is
+  22×88, four frames. `Sprite::frames()` recognises a strip geometrically (height an exact
+  multiple of width) and the cache stores a cropped UV rect for the first frame. Drawing the
+  full strip would silently render every animated item at 1/frames size — a bug visible only
+  if you happen to look at the right item.
 
 ## 9. Exercises, if you want to change something
 
@@ -326,9 +353,10 @@ Each of these is a real, contained task:
    multi/favourite rules disagree with the parser.
 3. **Add an item category.** Add a `mask_` function in `catalog.rs` and a pill in
    `side_right`. The tests assert that every item lands in exactly one group.
-4. **Animated sprite frames.** Some item sheets hold several frames side by side (swinging
-   weapons). `Sprite` currently uses the whole image; splitting it into frames and cycling
-   them on hover would be a contained project — start in `sprites::decode_xnb`.
+4. **Animate the sprite frames.** `Sprite::frame_height()` already finds the frame boundary
+   and the cache stores the top frame's UV rect; cycling through frames on hover (advance the
+   UV rect's `min.y`/`max.y`) is a contained extension, and it makes the animated items look
+   alive instead of frozen on their first frame.
 
 ---
 

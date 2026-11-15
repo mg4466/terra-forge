@@ -74,6 +74,27 @@ impl Sprite {
         self.width.max(self.height)
     }
 
+    /// How many animation frames are stacked vertically in this texture.
+    ///
+    /// Terraria stores animated item art (souls, pets, banners, some critters)
+    /// as a *vertical strip* inside one `Item_<id>.xnb`: the file for a 4-frame
+    /// soul is 22 x 88. Drawing the whole strip shrinks the item to a quarter of
+    /// its size, so the UI needs to know where the first frame ends. The only
+    /// reliable signal is geometry — frame height equals the texture width — so
+    /// a strip is recognised when the height is an exact multiple of the width.
+    pub fn frames(&self) -> u32 {
+        if self.width > 0 && self.height > self.width && self.height.is_multiple_of(self.width) {
+            self.height / self.width
+        } else {
+            1
+        }
+    }
+
+    /// Height of a single frame in pixels (the texture height for still art).
+    pub fn frame_height(&self) -> u32 {
+        self.height / self.frames()
+    }
+
     /// Size in bytes of the RGBA buffer (for cache accounting).
     pub fn bytes(&self) -> usize {
         self.rgba.len()
@@ -304,6 +325,25 @@ mod tests {
             Ok(None) => eprintln!("no Terraria install found; skipping sprite decode test"),
             Err(e) => panic!("decode failed: {e}"),
         }
+    }
+
+    #[test]
+    fn vertical_strips_are_measured_by_frame() {
+        let strip = Sprite {
+            width: 22,
+            height: 88,
+            rgba: vec![0; 22 * 88 * 4],
+        };
+        assert_eq!(strip.frames(), 4);
+        assert_eq!(strip.frame_height(), 22);
+
+        let still = Sprite {
+            width: 48,
+            height: 16,
+            rgba: vec![0; 48 * 16 * 4],
+        };
+        assert_eq!(still.frames(), 1);
+        assert_eq!(still.frame_height(), 16);
     }
 
     #[test]

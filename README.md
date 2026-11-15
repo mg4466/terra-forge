@@ -19,15 +19,22 @@ can reproduce byte for byte.**
 * **Drag and drop** — pick an item up in one slot and drop it in another to swap; drag an
   item out of the browser onto a slot to add it. Right-click gives a menu (max stack,
   favourite, duplicate, clear), the mouse wheel adjusts stacks, middle-click duplicates.
+* **Slot inspector** — the selected slot gets a real editor: item name and id, a searchable
+  prefix picker (all 84 modifiers), exact stack count, favourite and clear.
+* **Stash mode** — open a second character alongside the first and drag items straight
+  between the two saves; each side saves independently, with its own backup.
 * **Real item artwork** — sprites are decoded from your own game files, so slots show the
-  actual Terraria art. Without an installed game (or with the toggle off) you get
-  rarity-coloured tiles instead.
+  actual Terraria art. Animated art (souls, pets) is drawn from its first frame instead of
+  being squeezed to a quarter size. Without an installed game (or with the toggle off) you
+  get rarity-coloured tiles instead.
 * **Item browser** — 6,196 items with names, ids, rarity, stack limits and tooltips.
   Grouped into sections (weapons, armor, accessories, blocks, …) and subdivided by damage
   class or slot; typing switches to fuzzy search.
-* **Character sheet** — name, difficulty, life/mana, permanent upgrades, hair and seven
-  colours.
-* **Journey mode** — read your research progress; buffs are editable slot by slot.
+* **Character sheet** — name, difficulty, life/mana, all permanent upgrades (including the
+  six 1.4.4 boosters), hair and seven colours.
+* **Journey mode** — research is editable: filter the catalogue, complete one item at a
+  time, or research everything with a known goal in one click. Buffs are editable slot by
+  slot.
 * **Adjustable UI** — zoom 0.8–2.0 and slot size, remembered between runs.
 * **Backups** — every save first copies the old file to `<name>.plr.bak`.
 
@@ -54,7 +61,7 @@ game and the editor both write the same file; whoever writes last wins.
 
 ## Build
 
-Needs Rust 1.85+ and a normal Linux desktop with Vulkan or OpenGL drivers.
+Needs Rust 1.95+ (eframe 0.37's MSRV) and a normal Linux desktop with Vulkan or OpenGL drivers.
 
 ```sh
 git clone https://github.com/mg4466/terra-forge
@@ -106,12 +113,17 @@ build still understands that format.
 | action | effect |
 |---|---|
 | Ctrl+S | save (with backup) |
+| Ctrl+O | open a character (rescans first) |
+| Ctrl+F | focus the item search |
+| Esc / right-click while dragging | cancel the drag |
 | drag slot → slot | swap the two items |
+| drag slot → slot in the other pane | move the item between characters |
 | drag browser item → slot | add that item |
 | right-click slot | pick up / duplicate / max stack / favourite / clear |
 | middle-click slot | duplicate onto the cursor |
 | wheel over slot | ±1 stack (Shift: ±100) |
 | click an item in the browser | put it in the selected slot |
+| `Stash…` in the top bar | open a second character for transfers |
 | `Aa` in the top bar | zoom and slot size |
 
 ## How the item data is made
@@ -132,7 +144,8 @@ containers, LZX-compressed with a per-chunk length prefix on top. Decoding one c
 0.05 ms, so the editor decodes a sprite the first time it is drawn and keeps the result in a
 small GPU cache — no import step, no atlas file, and art that always matches your game
 version. Large sprites are shrunk to fit a slot, tiny ones (coins, blocks, torches) get an
-integer 2× so they stay recognisable.
+integer 2× so they stay recognisable, and animated sheets (a soul is 22×88, four frames tall)
+contribute only their first frame so the icon keeps its proper size.
 
 To refresh the database after a game update:
 

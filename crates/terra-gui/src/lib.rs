@@ -94,10 +94,45 @@ impl PlayerEntry {
 
 /// An item in flight: either picked from a slot (`from` set) or dragged out of
 /// the item browser (`from` is `None`, which turns a drop into a copy).
+///
+/// `side` records *which character* the source slot belongs to, so the same
+/// `Drag` can carry an item from the stash to the hero or the other way round.
 #[derive(Clone, Copy)]
 struct Drag {
+    side: Side,
     from: Option<SlotRef>,
     item: Slot,
+}
+
+/// Which character a slot belongs to. The stash is a second, fully editable
+/// `PlayerFile`; without this tag a slot reference would be ambiguous.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Primary,
+    Stash,
+}
+
+/// A second character kept open purely as a source/sink for items.
+struct Stash {
+    path: PathBuf,
+    player: terra_core::PlayerFile,
+    dirty: bool,
+}
+
+/// A texture drawn on screen, plus the part of it that is one animation frame.
+#[derive(Clone)]
+struct SpriteTex {
+    handle: egui::TextureHandle,
+    /// Full texture for still art; the top frame for a vertical strip.
+    uv: egui::Rect,
+}
+
+impl SpriteTex {
+    /// Size of one frame in pixels (not the whole strip).
+    fn frame_size(&self) -> Vec2 {
+        let size = self.handle.size_vec2();
+        Vec2::new(size.x, size.y * self.uv.height())
+    }
 }
 
 /// Lazily decoded item sprites, held as GPU textures in a small LRU cache.
@@ -106,9 +141,13 @@ struct Drag {
 /// there is no pre-pass: a sprite is decoded the first time a slot showing it is
 /// drawn on screen. Only a few hundred are ever live at once, and misses are
 /// cached too so a missing file is not re-read every frame.
+///
+/// The eviction order is true LRU: hits are promoted to the back, so browsing
+/// the 6,196-item catalogue cannot evict the sprites of the gear currently on
+/// screen. A plain insertion-order queue would do exactly that.
 struct SpriteCache {
     /// `None` means "looked for it, there is no sprite for this id".
-    textures: std::collections::HashMap<i32, Option<egui::TextureHandle>>,
+    textures: std::collections::HashMap<i32, Option<SpriteTex>>,
     order: std::collections::VecDeque<i32>,
     cap: usize,
 }
@@ -122,29 +161,51 @@ impl SpriteCache {
         }
     }
 
-    fn get(&mut self, ctx: &egui::Context, id: i32) -> Option<egui::TextureHandle> {
+    fn get(&mut self, ctx: &egui::Context, id: i32) -> Option<SpriteTex> {
         if let Some(hit) = self.textures.get(&id) {
-            return hit.clone();
+            let hit = hit.clone();
+            self.promote(id);
+            return hit;
         }
-        let handle = match terra_assets::sprites::load_item_sprite(id) {
+        let entry = match terra_assets::sprites::load_item_sprite(id) {
             Ok(Some(sprite)) => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [sprite.width as usize, sprite.height as usize],
                     &sprite.rgba,
                 );
                 // Nearest filtering: pixel art must not be blurred.
-                Some(ctx.load_texture(format!("item-{id}"), image, egui::TextureOptions::NEAREST))
+                let handle =
+                    ctx.load_texture(format!("item-{id}"), image, egui::TextureOptions::NEAREST);
+                // Animated art is a vertical strip; draw only its first frame,
+                // otherwise a four-frame soul is rendered at quarter size.
+                let frame_frac = sprite.frame_height() as f32 / sprite.height.max(1) as f32;
+                Some(SpriteTex {
+                    handle,
+                    uv: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, frame_frac)),
+                })
             }
             _ => None,
         };
-        self.textures.insert(id, handle.clone());
+        self.textures.insert(id, entry.clone());
         self.order.push_back(id);
+        self.evict();
+        entry
+    }
+
+    /// Move a used id to the back of the eviction queue.
+    fn promote(&mut self, id: i32) {
+        if let Some(pos) = self.order.iter().position(|&x| x == id) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(id);
+    }
+
+    fn evict(&mut self) {
         while self.order.len() > self.cap {
             if let Some(old) = self.order.pop_front() {
                 self.textures.remove(&old);
             }
         }
-        handle
     }
 }
 
@@ -161,6 +222,8 @@ pub struct App {
     tab: Tab,
     selected_loadout: u8,
     selected: Option<SlotRef>,
+    /// Which character `selected` points into.
+    selected_side: Side,
 
     /// In-progress drag-and-drop, if any.
     drag: Option<Drag>,
@@ -170,9 +233,17 @@ pub struct App {
     catalog: Catalog,
 
     open_picker: bool,
+    /// When set, the picker loads a stash character instead of replacing the hero.
+    picker_for_stash: bool,
     picker_filter: String,
     manual_path: String,
     players: Vec<PlayerEntry>,
+
+    /// Optional second character for transferring items between saves.
+    stash: Option<Stash>,
+
+    prefix_filter: String,
+    journey_filter: String,
 
     show_settings: bool,
     hovered_item: Option<i32>,
@@ -195,17 +266,22 @@ impl App {
             tab: Tab::Inventory,
             selected_loadout: 0,
             selected: None,
+            selected_side: Side::Primary,
             drag: None,
             search: String::new(),
             cat: 0,
             catalog: Catalog::default(),
             open_picker: true,
+            picker_for_stash: false,
             picker_filter: String::new(),
             manual_path: String::new(),
             players: Vec::new(),
+            stash: None,
+            prefix_filter: String::new(),
+            journey_filter: String::new(),
             show_settings: false,
             hovered_item: None,
-            sprites: SpriteCache::new(600),
+            sprites: SpriteCache::new(2500),
         };
         app.rebuild_catalog();
         app.rescan();
@@ -214,6 +290,11 @@ impl App {
             app.open(PathBuf::from(arg));
             // Opening straight into a character should not leave the picker on top.
             app.open_picker = app.player.is_none();
+        }
+        // Screenshot/manual-check hook: open a second character immediately so
+        // the split stash view can be reached without a mouse.
+        if let Some(stash) = std::env::var_os("TF_STASH") {
+            app.open_stash(PathBuf::from(stash));
         }
         // Handy for screenshots and manual checking without a mouse.
         if let Ok(tab) = std::env::var("TF_TAB") {
@@ -252,6 +333,7 @@ impl App {
                 self.path = Some(path);
                 self.player = Some(p);
                 self.dirty = false;
+                self.selected_side = Side::Primary;
                 self.selected = Some(SlotRef {
                     c: Ct::Bag(Bag::Inv),
                     i: 0,
@@ -287,6 +369,43 @@ impl App {
         }
     }
 
+    /// Load the optional second character. It is deliberately not discovered
+    /// automatically: silently opening somebody else's character as a stash
+    /// would be a surprising thing for a file editor to do.
+    fn open_stash(&mut self, path: PathBuf) {
+        match terra_core::load(&path) {
+            Ok(player) => {
+                let name = player.name.clone();
+                self.stash = Some(Stash {
+                    path,
+                    player,
+                    dirty: false,
+                });
+                self.set_status(format!("Stash character: {name}"), false);
+                self.tab = Tab::Inventory;
+            }
+            Err(e) => self.set_status(format!("Could not open stash: {e}"), true),
+        }
+    }
+
+    fn save_stash(&mut self) {
+        let Some(mut stash) = self.stash.take() else {
+            return;
+        };
+        match terra_core::save_with_backup(&stash.path, &stash.player) {
+            Ok(_) => {
+                stash.dirty = false;
+                let name = stash.player.name.clone();
+                self.stash = Some(stash);
+                self.set_status(format!("Stash saved: {name}"), false);
+            }
+            Err(e) => {
+                self.stash = Some(stash);
+                self.set_status(format!("Stash save failed: {e}"), true);
+            }
+        }
+    }
+
     fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         self.status = msg.into();
         self.status_is_error = is_error;
@@ -300,28 +419,94 @@ impl App {
 
     /// Drop `drag` onto `to`: dragging from a slot swaps the two, dragging from
     /// the browser copies. All the actual byte-level rules live in `operations`.
-    fn drop_on(&mut self, to: SlotRef, drag: Drag) {
-        if let Some(mut p) = self.player.take() {
-            operations::drop_item(self.db, &mut p, to, drag.from, drag.item);
-            self.player = Some(p);
-            self.dirty = true;
+    ///
+    /// When the drag started on one character and ends on the other, the two
+    /// models are handed to `operations::transfer_item` together.
+    fn drop_on(&mut self, side: Side, to: SlotRef, drag: Drag) {
+        let db = self.db;
+        match (drag.side, side) {
+            (Side::Primary, Side::Primary) => {
+                if let Some(p) = self.player.as_mut() {
+                    operations::drop_item(db, p, to, drag.from, drag.item);
+                    self.dirty = true;
+                }
+            }
+            (Side::Stash, Side::Stash) => {
+                if let Some(s) = self.stash.as_mut() {
+                    operations::drop_item(db, &mut s.player, to, drag.from, drag.item);
+                    s.dirty = true;
+                }
+            }
+            (Side::Primary, Side::Stash) => {
+                if let (Some(p), Some(s)) = (self.player.as_mut(), self.stash.as_mut()) {
+                    operations::transfer_item(db, p, &mut s.player, to, drag.from, drag.item);
+                    s.dirty = true;
+                }
+            }
+            (Side::Stash, Side::Primary) => {
+                if let (Some(s), Some(p)) = (self.stash.as_mut(), self.player.as_mut()) {
+                    operations::transfer_item(db, &mut s.player, p, to, drag.from, drag.item);
+                    self.dirty = true;
+                }
+            }
         }
         self.selected = Some(to);
+        self.selected_side = side;
     }
 
     /// Put an item into a slot without a source slot (browser click / duplicate).
     fn place(&mut self, to: SlotRef, item: Slot) {
-        self.drop_on(to, Drag { from: None, item });
+        self.drop_on(
+            self.selected_side,
+            to,
+            Drag {
+                side: self.selected_side,
+                from: None,
+                item,
+            },
+        );
     }
 
-    fn clear_slot(&mut self, r: SlotRef) {
-        if let Some(p) = &mut self.player {
+    fn clear_slot(&mut self, side: Side, r: SlotRef) {
+        if let Some(p) = self.player_mut(side) {
             operations::clear(p, r);
-            self.dirty = true;
+            self.mark_dirty(side);
         }
     }
 
-    fn describe(&self, slot: &Slot) -> String {
+    fn player_of(&self, side: Side) -> Option<&terra_core::PlayerFile> {
+        match side {
+            Side::Primary => self.player.as_ref(),
+            Side::Stash => self.stash.as_ref().map(|s| &s.player),
+        }
+    }
+
+    fn player_mut(&mut self, side: Side) -> Option<&mut terra_core::PlayerFile> {
+        match side {
+            Side::Primary => self.player.as_mut(),
+            Side::Stash => self.stash.as_mut().map(|s| &mut s.player),
+        }
+    }
+
+    fn is_dirty(&self, side: Side) -> bool {
+        match side {
+            Side::Primary => self.dirty,
+            Side::Stash => self.stash.as_ref().map(|s| s.dirty).unwrap_or(false),
+        }
+    }
+
+    fn mark_dirty(&mut self, side: Side) {
+        match side {
+            Side::Primary => self.dirty = true,
+            Side::Stash => {
+                if let Some(s) = self.stash.as_mut() {
+                    s.dirty = true;
+                }
+            }
+        }
+    }
+
+    fn describe(&self, slot: &Slot, ct: Option<Ct>) -> String {
         if slot.is_empty() {
             return "empty".into();
         }
@@ -329,7 +514,10 @@ impl App {
         if let Some(p) = self.db.prefix_name(slot.prefix) {
             s.push_str(&format!(" · {p}"));
         }
-        if slot.stack > 1 && is_multi(Ct::Bag(Bag::Inv)) {
+        // Only containers that actually store a stack get a ×N suffix; a piece
+        // of armour dragged from the bank into an equipment slot must not claim
+        // to be a stack of twelve.
+        if slot.stack > 1 && ct.map(is_multi).unwrap_or(true) {
             s.push_str(&format!(" ×{}", slot.stack));
         }
         s
@@ -371,14 +559,34 @@ fn apply_theme(ctx: &egui::Context, zoom: f32) {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
 
-        if (ctx.input(|i| i.modifiers.ctrl || i.modifiers.command))
-            && ctx.input(|i| i.key_pressed(egui::Key::S))
-        {
+        if ctrl && ctx.input(|i| i.key_pressed(egui::Key::S)) {
             self.save();
         }
-        // A drag that ends over nothing is simply cancelled.
-        if self.drag.is_some() && ctx.input(|i| i.pointer.any_released()) {
+        // Ctrl+O re-scans before opening: the character may have been created
+        // since the last scan, and that is exactly when someone reaches for it.
+        if ctrl && ctx.input(|i| i.key_pressed(egui::Key::O)) {
+            self.rescan();
+            self.picker_for_stash = false;
+            self.open_picker = true;
+        }
+        // Ctrl+F focuses the item search, but only when no text box already has
+        // focus — otherwise Ctrl+F in the path field would steal the caret.
+        if ctrl
+            && ctx.input(|i| i.key_pressed(egui::Key::F))
+            && ctx.memory(|m| m.focused()).is_none()
+        {
+            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("item-search")));
+        }
+        // Escape and right-click cancel a drag, matching the footer's promise.
+        // This happens before the slots are drawn so the release that ends a
+        // real drop is not mistaken for a cancel (that is why the generic
+        // "released anywhere" cleanup runs at the *end* of the frame).
+        if self.drag.is_some()
+            && (ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                || ctx.input(|i| i.pointer.secondary_clicked()))
+        {
             self.drag = None;
         }
 
@@ -390,13 +598,20 @@ impl eframe::App for App {
         self.picker_window(&ctx);
         self.settings_window(&ctx);
         self.drag_ghost(&ctx);
+
+        // A drag that ends over nothing is simply cancelled. Deliberately last:
+        // slots get first refusal on the release, then whatever is left over is
+        // a drop on empty space.
+        if self.drag.is_some() && ctx.input(|i| i.pointer.any_released()) {
+            self.drag = None;
+        }
     }
 }
 
 impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.heading(RichText::new("terra-forge").strong());
                 ui.separator();
                 if ui
@@ -405,7 +620,50 @@ impl App {
                     .clicked()
                 {
                     self.rescan();
+                    self.picker_for_stash = false;
                     self.open_picker = true;
+                }
+                if ui
+                    .button("Stash…")
+                    .on_hover_text(
+                        "Open a second character to move items between saves.\n\
+                         Only you choose the file; nothing is opened automatically.",
+                    )
+                    .clicked()
+                {
+                    self.rescan();
+                    self.picker_for_stash = true;
+                    self.open_picker = true;
+                }
+                if let Some((stash_name, stash_dirty)) = self
+                    .stash
+                    .as_ref()
+                    .map(|s| (s.player.name.clone(), s.dirty))
+                {
+                    let label = if stash_dirty {
+                        "Save stash *"
+                    } else {
+                        "Save stash"
+                    };
+                    let save_clicked = ui
+                        .add(egui::Button::new(label))
+                        .on_hover_text("Write the stash character back to its own file")
+                        .clicked();
+                    let close_clicked = ui.button("Close stash").clicked();
+                    ui.label(RichText::new(format!("stash: {stash_name}")).weak().small());
+                    if save_clicked {
+                        self.save_stash();
+                    }
+                    if close_clicked {
+                        self.stash = None;
+                        if self.selected_side == Side::Stash {
+                            self.selected_side = Side::Primary;
+                            self.selected = Some(SlotRef {
+                                c: Ct::Bag(Bag::Inv),
+                                i: 0,
+                            });
+                        }
+                    }
                 }
                 let can_save = self.player.is_some();
                 let save_label = if self.dirty { "Save *" } else { "Save" };
@@ -453,18 +711,31 @@ impl App {
                     );
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(p) = &self.player {
+                if let Some(p) = &self.player {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · items {}",
+                            p.format_name(),
+                            self.db.game_version
+                        ))
+                        .weak(),
+                    );
+                    if p.version > terra_core::plr::VER_1_4_5_8 {
                         ui.label(
                             RichText::new(format!(
-                                "{} · items {}",
-                                p.format_name(),
-                                self.db.game_version
+                                "newer save (v{}) · unknown fields kept as-is",
+                                p.version
                             ))
-                            .weak(),
+                            .color(Color32::from_rgb(232, 184, 96)),
+                        )
+                        .on_hover_text(
+                            "This file comes from a newer game build than terra-forge was \
+                             written for. Everything it does not understand is preserved \
+                             verbatim on save, but new fields will not be editable here.",
                         );
                     }
-                });
+                }
             });
         });
     }
@@ -619,9 +890,22 @@ impl App {
                     changed |= ui
                         .checkbox(&mut p.finished_dd2_event, "Old One's Army completed")
                         .changed();
-                    changed |= ui
-                        .checkbox(&mut p.extra_using_flags[0], "Advanced Combat Targeting")
-                        .changed();
+                    // The six 1.4.4 permanent boosters, in the order the file
+                    // stores them (see `PlayerFile::extra_using_flags`). The
+                    // first one's internal name is `AegisCrystal` but the item
+                    // the player actually consumes is the Vital Crystal.
+                    if p.version >= terra_core::plr::VER_1_4_4_0 {
+                        for (flag, name) in p.extra_using_flags.iter_mut().zip([
+                            "Vital Crystal (life regen)",
+                            "Aegis Fruit (defence)",
+                            "Arcane Crystal (mana regen)",
+                            "Galaxy Pearl (luck)",
+                            "Gummy Worm (fishing)",
+                            "Ambrosia (mining speed)",
+                        ]) {
+                            changed |= ui.checkbox(flag, name).changed();
+                        }
+                    }
 
                     ui.add_space(8.0);
                     ui.label(RichText::new("Colours").strong());
@@ -678,6 +962,7 @@ impl App {
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut self.search)
+                            .id(egui::Id::unique("item-search"))
                             .hint_text("search…  name, phrase or id")
                             .desired_width(f32::INFINITY),
                     )
@@ -704,6 +989,14 @@ impl App {
                 });
                 ui.separator();
 
+                // The inspector and footer are a fixed strip at the bottom; the
+                // catalogue scrolls in whatever space is left. Declaring the
+                // bottom panel first is what makes that reservation work.
+                egui::Panel::bottom("browser-bottom").show(ui, |ui| {
+                    self.inspector(ui);
+                    self.browser_footer(ui);
+                });
+
                 let rows = std::mem::take(&mut self.catalog.rows);
                 let total = rows.len();
                 ui.label(
@@ -722,9 +1015,129 @@ impl App {
                         }
                     });
                 self.catalog.rows = rows;
-                ui.separator();
-                self.browser_footer(ui);
             });
+    }
+
+    /// Editable view of the currently selected slot: prefix, stack, favourite.
+    ///
+    /// This exists because a slot cell can only show a picture and a number.
+    /// Prefixes have 84 legal values, and choosing one from a grid would be
+    /// absurd; the inspector is the honest place for it.
+    fn inspector(&mut self, ui: &mut egui::Ui) {
+        let Some(r) = self.selected else { return };
+        let side = self.selected_side;
+        let Some(slot) = self
+            .player_of(side)
+            .and_then(|p| container(p, r.c).get(r.i).copied())
+        else {
+            return;
+        };
+        if slot.is_empty() {
+            return;
+        }
+        let db = self.db;
+        ui.separator();
+        ui.label(RichText::new("Selected slot").strong());
+        ui.label(
+            RichText::new(format!(
+                "{}  [#{} · {} #{}]",
+                db.display_name(slot.net_id),
+                slot.net_id,
+                container_label(r.c),
+                r.i
+            ))
+            .weak()
+            .small(),
+        );
+
+        // Prefix: a filtered combo box. The filter field lives in `App` because
+        // egui keeps no widget state of its own between frames.
+        let current = if slot.prefix == 0 {
+            "None (0)".to_string()
+        } else {
+            match db.prefix_name(slot.prefix) {
+                Some(name) => format!("#{} · {name}", slot.prefix),
+                None => format!("#{} · unknown", slot.prefix),
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.label("Prefix");
+            egui::ComboBox::from_id_salt("prefix-combo")
+                .selected_text(current)
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.prefix_filter)
+                            .hint_text("filter prefixes…")
+                            .desired_width(180.0),
+                    );
+                    let filter = self.prefix_filter.to_lowercase();
+                    let mut chosen: Option<u8> = None;
+                    if ui.selectable_label(slot.prefix == 0, "None (0)").clicked() {
+                        chosen = Some(0);
+                    }
+                    for prefix in &self.db.prefixes {
+                        if !filter.is_empty() && !prefix.name.to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        if ui
+                            .selectable_label(
+                                slot.prefix == prefix.id,
+                                format!("#{} · {}", prefix.id, prefix.name),
+                            )
+                            .clicked()
+                        {
+                            chosen = Some(prefix.id);
+                        }
+                    }
+                    if let Some(prefix) = chosen {
+                        if let Some(p) = self.player_mut(side) {
+                            if operations::set_prefix(p, r, prefix) {
+                                self.mark_dirty(side);
+                            }
+                        }
+                    }
+                });
+        });
+
+        if is_multi(r.c) {
+            ui.horizontal(|ui| {
+                ui.label("Stack");
+                let max = db.max_stack(slot.net_id).max(1);
+                let mut stack = slot.stack;
+                let response = ui.add(
+                    egui::DragValue::new(&mut stack)
+                        .speed(1)
+                        .range(1..=max)
+                        .suffix(format!(" / {max}")),
+                );
+                if response.changed() {
+                    if let Some(p) = self.player_mut(side) {
+                        if operations::set_stack(db, p, r, stack) {
+                            self.mark_dirty(side);
+                        }
+                    }
+                }
+            });
+        }
+
+        ui.horizontal(|ui| {
+            let mut favourite = slot.favorited;
+            if ui
+                .checkbox(&mut favourite, "Favourite")
+                .on_hover_text("The star keeps the item in place when you quick-stack in game")
+                .changed()
+            {
+                if let Some(p) = self.player_mut(side) {
+                    if operations::toggle_favourite(p, r) {
+                        self.mark_dirty(side);
+                    }
+                }
+            }
+            if ui.button("Clear slot").clicked() {
+                self.clear_slot(side, r);
+            }
+        });
     }
 
     /// A section heading inside the item list.
@@ -766,17 +1179,15 @@ impl App {
         };
         match sprite {
             Some(texture) => {
-                let native = texture.size_vec2();
+                // Use one animation frame, not the whole strip, so a 4-frame
+                // soul is not shrunk to a quarter of its size.
+                let native = texture.frame_size();
                 let max_side = native.x.max(native.y);
                 let fit = (icon.width() - 2.0) / max_side;
                 let scale = if fit >= 2.0 { 2.0 } else { fit.min(1.0) };
                 let target = egui::Rect::from_center_size(icon.center(), native * scale);
-                ui.painter().image(
-                    texture.id(),
-                    target,
-                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                ui.painter()
+                    .image(texture.handle.id(), target, texture.uv, Color32::WHITE);
             }
             None => {
                 ui.painter().rect_filled(
@@ -821,6 +1232,7 @@ impl App {
         if resp.drag_started() {
             let item_slot = Slot::new(id, self.db.max_stack(id), 0);
             self.drag = Some(Drag {
+                side: self.selected_side,
                 from: None,
                 item: item_slot,
             });
@@ -839,6 +1251,7 @@ impl App {
                         false,
                     );
                     self.drag = Some(Drag {
+                        side: self.selected_side,
                         from: None,
                         item: item_slot,
                     });
@@ -868,7 +1281,7 @@ impl App {
         }
         if let Some(d) = &self.drag {
             ui.label(
-                RichText::new(format!("Holding: {}", self.describe(&d.item)))
+                RichText::new(format!("Holding: {}", self.describe(&d.item, None)))
                     .color(Color32::from_rgb(205, 195, 130)),
             );
             ui.label(
@@ -925,6 +1338,53 @@ impl App {
     }
 
     fn tab_inventory(&mut self, ui: &mut egui::Ui) {
+        if self.stash.is_some() {
+            // Two characters, side by side: the whole point is to drag across.
+            let width = ((ui.available_width() - 24.0) / 2.0).max(180.0);
+            let height = ui.available_height();
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.pane_heading(ui, Side::Primary);
+                        self.pane_primary(ui);
+                    },
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.pane_heading(ui, Side::Stash);
+                        self.pane_stash(ui);
+                    },
+                );
+            });
+            return;
+        }
+        self.pane_primary(ui);
+    }
+
+    fn pane_heading(&self, ui: &mut egui::Ui, side: Side) {
+        let name = self
+            .player_of(side)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "—".into());
+        let star = if self.is_dirty(side) { " *" } else { "" };
+        // Both characters can share a name (Terraria allows it), and a narrow
+        // pane truncates whatever is longest. Label the stash pane with its role
+        // rather than a name that may not fit.
+        let text = if side == Side::Stash {
+            format!("Stash{star}")
+        } else {
+            format!("{name}{star}")
+        };
+        ui.add(egui::Label::new(RichText::new(text).heading()).truncate());
+        ui.separator();
+    }
+
+    fn pane_primary(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Loadout");
             for (i, label) in ["1 (active)", "2", "3", "4"].iter().enumerate() {
@@ -965,6 +1425,26 @@ impl App {
             Ct::Bag(Bag::EquipItems),
         );
         self.section(ui, "Misc dyes", Ct::Bag(Bag::EquipDyes));
+    }
+
+    /// The stash pane: inventory, coins/ammo and all four bank containers. Its
+    /// equipped armour is deliberately not shown — a stash is somewhere items
+    /// go, not a second character being played.
+    fn pane_stash(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Drag between panes.").weak().small());
+        self.section_side(ui, Side::Stash, "Stash inventory", Ct::Bag(Bag::Inv));
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| self.section_side(ui, Side::Stash, "Coins", Ct::Bag(Bag::Coins)));
+            ui.vertical(|ui| self.section_side(ui, Side::Stash, "Ammo", Ct::Bag(Bag::Ammo)));
+        });
+        for (label, bag) in [
+            ("Piggy bank", Bag::Bank),
+            ("Safe", Bag::Safe),
+            ("Defender's forge", Bag::Forge),
+            ("Void vault", Bag::Void),
+        ] {
+            self.section_side(ui, Side::Stash, label, Ct::Bag(bag));
+        }
     }
 
     fn tab_banks(&mut self, ui: &mut egui::Ui) {
@@ -1033,29 +1513,97 @@ impl App {
 
     fn tab_journey(&mut self, ui: &mut egui::Ui) {
         let Some(p) = &self.player else { return };
-        ui.label(format!("{} entries researched", p.research.len()));
-        ui.separator();
+        let researched = p.research.len();
+        let with_goal = self
+            .db
+            .items
+            .iter()
+            .filter(|i| !i.pid.is_empty() && i.research_goal > 0)
+            .count();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "{researched} entries researched · {with_goal} items have a research goal"
+            ));
+            if ui
+                .button("Research all")
+                .on_hover_text(
+                    "Set every item with a known goal to fully researched.\n\
+                     Counts already higher than the goal are left alone. Revert undoes it.",
+                )
+                .clicked()
+            {
+                if let Some(p) = &mut self.player {
+                    let changed = operations::research_all(self.db, p);
+                    self.dirty = true;
+                    self.set_status(format!("Research all: {changed} entries updated"), false);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.journey_filter)
+                    .hint_text("name or id")
+                    .desired_width(220.0),
+            );
+        });
+
+        // The catalogue is ~6,200 items; only the visible rows are drawn, so
+        // rebuilding this id list each frame keeps the list responsive without
+        // a parallel cache to invalidate.
+        let filter = self.journey_filter.trim().to_lowercase();
+        let ids: Vec<i32> = self
+            .db
+            .items
+            .iter()
+            .filter(|i| !i.pid.is_empty() && i.research_goal > 0)
+            .filter(|i| {
+                filter.is_empty()
+                    || i.name.to_lowercase().contains(&filter)
+                    || i.id.to_string() == filter
+            })
+            .map(|i| i.id)
+            .collect();
+        let total = ids.len();
+        let mut complete: Option<(String, i32)> = None;
         egui::ScrollArea::vertical()
+            .id_salt("journey")
             .max_height(460.0)
-            .show(ui, |ui| {
-                for (pid, count) in &p.research {
-                    match self.db.by_pid(pid) {
-                        Some(item) => {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&item.name).strong());
-                                ui.label(RichText::new(format!("#{}", item.id)).weak());
-                                ui.label(format!("×{count}"));
-                            });
+            .show_rows(ui, 22.0, total, |ui, range| {
+                for idx in range {
+                    let Some(item) = self.db.by_id(ids[idx]) else {
+                        continue;
+                    };
+                    let current = self
+                        .player
+                        .as_ref()
+                        .and_then(|p| p.research.iter().find(|(k, _)| *k == item.pid))
+                        .map(|(_, n)| *n)
+                        .unwrap_or(0);
+                    ui.horizontal(|ui| {
+                        ui.add_sized([200.0, 18.0], egui::Label::new(&item.name).truncate());
+                        ui.label(RichText::new(format!("#{}", item.id)).weak().small());
+                        ui.label(format!("{current}/{}", item.research_goal));
+                        if current >= item.research_goal {
+                            ui.label(
+                                RichText::new("✓ done").color(Color32::from_rgb(130, 200, 130)),
+                            );
+                        } else if ui
+                            .small_button("Complete")
+                            .on_hover_text("Research this item to its goal")
+                            .clicked()
+                        {
+                            complete = Some((item.pid.clone(), item.research_goal));
                         }
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(pid).weak());
-                                ui.label(format!("×{count}"));
-                            });
-                        }
-                    }
+                    });
                 }
             });
+        if let Some((pid, goal)) = complete {
+            if let Some(p) = &mut self.player {
+                operations::research_item(p, &pid, goal);
+                self.dirty = true;
+            }
+        }
     }
 
     fn tab_raw(&mut self, ui: &mut egui::Ui) {
@@ -1104,11 +1652,15 @@ impl App {
 
     // ------------------------------------------------------------ slot grid
 
-    /// Draw a titled block of slots.
+    /// Draw a titled block of slots for the primary character.
     fn section(&mut self, ui: &mut egui::Ui, title: &str, ct: Ct) {
+        self.section_side(ui, Side::Primary, title, ct);
+    }
+
+    /// Draw a titled block of slots for either character.
+    fn section_side(&mut self, ui: &mut egui::Ui, side: Side, title: &str, ct: Ct) {
         let n = self
-            .player
-            .as_ref()
+            .player_of(side)
             .map(|p| container(p, ct).len())
             .unwrap_or(0);
         if n == 0 {
@@ -1137,7 +1689,7 @@ impl App {
                     if i >= n {
                         break;
                     }
-                    self.slot(ui, SlotRef { c: ct, i }, cell);
+                    self.slot_side(ui, side, SlotRef { c: ct, i }, cell);
                     i += 1;
                 }
             });
@@ -1145,14 +1697,17 @@ impl App {
     }
 
     /// One inventory cell: paints the item, handles select/drag/scroll/context menu.
-    fn slot(&mut self, ui: &mut egui::Ui, r: SlotRef, cell: f32) {
-        let Some(p) = &self.player else { return };
+    fn slot_side(&mut self, ui: &mut egui::Ui, side: Side, r: SlotRef, cell: f32) {
+        let Some(p) = self.player_of(side) else {
+            return;
+        };
         let slot = *container(p, r.c).get(r.i).unwrap_or(&Slot::empty());
         let multi = is_multi(r.c);
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(cell), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
-        let border = if self.selected == Some(r) {
+        let selected = self.selected == Some(r) && self.selected_side == side;
+        let border = if selected {
             Stroke::new(2.0, Color32::from_rgb(240, 200, 90))
         } else if resp.hovered() && self.drag.is_some() {
             Stroke::new(2.0, Color32::from_rgb(150, 200, 255))
@@ -1175,7 +1730,11 @@ impl App {
                     // Draw at native size: upscaling a 16 px coin to fill a 48 px
                     // slot is what makes sprite grids look wrong. Only oversized
                     // art is scaled down, keeping pixel alignment.
-                    let native = texture.size_vec2();
+                    //
+                    // `frame_size` is one animation frame, not the whole strip:
+                    // a soul's texture is 22x88, and drawing that whole thing
+                    // would shrink it to a quarter of its proper size.
+                    let native = texture.frame_size();
                     let room = cell - 8.0;
                     let max_side = native.x.max(native.y);
                     // Large art shrinks to fit; tiny art (coins, blocks, torches)
@@ -1184,12 +1743,7 @@ impl App {
                     let fit = room / max_side;
                     let scale = if fit >= 2.0 { 2.0 } else { fit.min(1.0) };
                     let target = egui::Rect::from_center_size(rect.center(), native * scale);
-                    painter.image(
-                        texture.id(),
-                        target,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    painter.image(texture.handle.id(), target, texture.uv, Color32::WHITE);
                     // Rarity stays visible, but as a quiet 2 px strip instead of a
                     // background wash that would fight the artwork.
                     painter.rect_filled(
@@ -1258,7 +1812,7 @@ impl App {
             };
             let tip = format!(
                 "{}  [{} #{}]",
-                self.describe(&slot),
+                self.describe(&slot, Some(r.c)),
                 container_label(r.c),
                 r.i
             );
@@ -1275,16 +1829,20 @@ impl App {
                     1
                 };
                 let delta = if scroll > 0.0 { step } else { -step };
-                if let Some(p) = &mut self.player {
-                    if operations::bump_stack(self.db, p, r, delta) {
-                        self.dirty = true;
-                    }
+                let db = self.db;
+                let changed = match self.player_mut(side) {
+                    Some(p) => operations::bump_stack(db, p, r, delta),
+                    None => false,
+                };
+                if changed {
+                    self.mark_dirty(side);
                 }
             }
         }
 
         if resp.drag_started() && !slot.is_empty() {
             self.drag = Some(Drag {
+                side,
                 from: Some(r),
                 item: slot,
             });
@@ -1302,23 +1860,23 @@ impl App {
         // Dropping: the slot under the cursor wins on release.
         if let Some(drag) = self.drag {
             if resp.hovered() && ui.input(|i| i.pointer.any_released()) {
-                self.drop_on(r, drag);
+                self.drop_on(side, r, drag);
                 self.drag = None;
-                self.selected = Some(r);
             }
         }
 
         if resp.clicked() {
             self.selected = Some(r);
+            self.selected_side = side;
             if let Some(drag) = self.drag.take() {
-                self.drop_on(r, drag);
+                self.drop_on(side, r, drag);
             }
         }
 
         // Right-click: the explicit route, for people who prefer menus.
         let mut action: Option<MenuAction> = None;
         resp.context_menu(|ui| {
-            ui.label(RichText::new(self.describe(&slot)).strong());
+            ui.label(RichText::new(self.describe(&slot, Some(r.c))).strong());
             ui.separator();
             let has = !slot.is_empty();
             if ui
@@ -1361,36 +1919,44 @@ impl App {
         match action {
             Some(MenuAction::Pick) => {
                 self.drag = Some(Drag {
+                    side,
                     from: Some(r),
                     item: slot,
                 })
             }
             Some(MenuAction::Duplicate) => {
                 self.drag = Some(Drag {
+                    side,
                     from: None,
                     item: slot,
                 })
             }
             Some(MenuAction::MaxStack) => {
-                if let Some(p) = &mut self.player {
-                    if operations::max_stack(self.db, p, r) {
-                        self.dirty = true;
-                    }
+                let db = self.db;
+                let changed = match self.player_mut(side) {
+                    Some(p) => operations::max_stack(db, p, r),
+                    None => false,
+                };
+                if changed {
+                    self.mark_dirty(side);
                 }
             }
             Some(MenuAction::Favourite) => {
-                if let Some(p) = &mut self.player {
-                    if operations::toggle_favourite(p, r) {
-                        self.dirty = true;
-                    }
+                let changed = match self.player_mut(side) {
+                    Some(p) => operations::toggle_favourite(p, r),
+                    None => false,
+                };
+                if changed {
+                    self.mark_dirty(side);
                 }
             }
-            Some(MenuAction::Clear) => self.clear_slot(r),
+            Some(MenuAction::Clear) => self.clear_slot(side, r),
             None => {}
         }
 
         if resp.middle_clicked() && !slot.is_empty() {
             self.drag = Some(Drag {
+                side,
                 from: None,
                 item: slot,
             });
@@ -1446,8 +2012,13 @@ impl App {
         }
         let mut stay_open = self.open_picker;
         let mut pick: Option<PathBuf> = None;
+        let title = if self.picker_for_stash {
+            "Open stash character"
+        } else {
+            "Open character"
+        };
 
-        egui::Window::new("Open character")
+        egui::Window::new(title)
             .open(&mut stay_open)
             .default_width(420.0)
             .min_width(360.0)
@@ -1525,7 +2096,11 @@ impl App {
             });
 
         if let Some(path) = pick {
-            self.open(path);
+            if self.picker_for_stash {
+                self.open_stash(path);
+            } else {
+                self.open(path);
+            }
             stay_open = false;
         }
         self.open_picker = stay_open;

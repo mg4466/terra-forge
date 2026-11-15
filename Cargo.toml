@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 authors = ["Michael Graham"]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 
 [workspace.dependencies]

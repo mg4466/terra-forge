@@ -267,6 +267,14 @@ pub struct PlayerFile {
     pub using_biome_torches: bool,
     pub ate_artisan_bread: bool,
     pub mystery_flag_1470: bool,
+    /// The six 1.4.4 permanent-booster flags, in on-disk order (v >= 269):
+    /// `usedAegisCrystal` (Vital Crystal), `usedAegisFruit`,
+    /// `usedArcaneCrystal`, `usedGalaxyPearl`, `usedGummyWorm`, `usedAmbrosia`.
+    ///
+    /// Verified against TEdit's reader/writer, which is the closest thing to a
+    /// readable copy of `Player.SavePlayer` that exists. The internal name for
+    /// Vital Crystal is `AegisCrystal`, which is why the field names and the
+    /// in-game names disagree.
     pub extra_using_flags: [bool; 6],
     pub finished_dd2_event: bool,
     pub tax_money: i32,

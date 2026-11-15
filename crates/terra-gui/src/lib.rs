@@ -1316,7 +1316,7 @@ impl App {
                     (Tab::Banks, "Banks"),
                     (Tab::Buffs, "Buffs"),
                     (Tab::Journey, "Journey"),
-                    (Tab::Raw, "Header"),
+                    (Tab::Raw, "File header"),
                 ] {
                     if ui.selectable_label(self.tab == t, name).clicked() {
                         self.tab = t;
@@ -1635,46 +1635,89 @@ impl App {
 
     fn tab_raw(&mut self, ui: &mut egui::Ui) {
         let Some(p) = &self.player else { return };
-        ui.label(RichText::new("Decoded header").strong());
-        egui::Grid::new("hdr").num_columns(2).show(ui, |ui| {
-            for (k, v) in [
-                ("version", p.version.to_string()),
-                ("format", p.format_name().to_string()),
-                ("meta version", p.meta_version.to_string()),
-                (
-                    "meta flags",
-                    format!("{:#x}/{:#x}", p.meta_flags1, p.meta_flags2),
-                ),
-                (
-                    "play time",
-                    format!(
-                        "{}s",
-                        (p.play_time_l as u64 / 10_000_000) + (p.play_time_h as u64 * 429)
+        ui.label(RichText::new("File header").heading());
+        ui.label(
+            RichText::new(
+                "Read-only values decoded from the top of the .plr — every one has an editable \
+                 control on another tab.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(8.0);
+
+        // Play time is stored as two counters in game ticks; presenting the raw
+        // arithmetic (`ticks / 10_000_000 + high * 429`) as seconds is correct
+        // but unreadable, so show a duration and keep the exact seconds in
+        // parentheses for anyone cross-checking the file.
+        let seconds = (p.play_time_l as u64 / 10_000_000) + (p.play_time_h as u64 * 429);
+        // Below a minute the duration label and the raw seconds are identical;
+        // showing "0 s (0 s)" is just noise.
+        let play_time = if seconds < 60 {
+            format!("{seconds} s")
+        } else {
+            format!("{} ({seconds} s)", duration_label(seconds))
+        };
+
+        let groups: [(&str, Vec<(&str, String)>); 3] = [
+            (
+                "Format",
+                vec![
+                    ("version", p.version.to_string()),
+                    ("format", p.format_name().to_string()),
+                    ("meta version", p.meta_version.to_string()),
+                    (
+                        "meta flags",
+                        format!("{:#x} / {:#x}", p.meta_flags1, p.meta_flags2),
                     ),
-                ),
-                (
-                    "hair style / dye",
-                    format!("{} / {}", p.hair_style, p.hair_dye),
-                ),
-                ("team", p.team.to_string()),
-                ("gender", p.gender.to_string()),
-                ("hide visual", format!("{:#06x}", p.hide_visual)),
-                ("tax money", p.tax_money.to_string()),
-                (
-                    "pve / pvp deaths",
-                    format!("{} / {}", p.pve_deaths, p.pvp_deaths),
-                ),
-                ("golfer score", p.golfer_score.to_string()),
-                ("angler quests", p.fishing_quests.to_string()),
-                ("bartender quests", p.bartender_quests.to_string()),
-                ("servers", p.servers.len().to_string()),
-                ("trailing bytes", p.trailing.len().to_string()),
-            ] {
-                ui.label(RichText::new(k).weak());
-                ui.label(v);
-                ui.end_row();
-            }
-        });
+                    (
+                        "trailing bytes",
+                        format!("{} — unparsed tail kept verbatim on save", p.trailing.len()),
+                    ),
+                ],
+            ),
+            (
+                "Play time & progress",
+                vec![
+                    ("play time", play_time),
+                    ("angler quests", p.fishing_quests.to_string()),
+                    ("bartender quests", p.bartender_quests.to_string()),
+                    ("golfer score", p.golfer_score.to_string()),
+                    (
+                        "pve / pvp deaths",
+                        format!("{} / {}", p.pve_deaths, p.pvp_deaths),
+                    ),
+                    ("tax money", p.tax_money.to_string()),
+                    ("saved servers", p.servers.len().to_string()),
+                ],
+            ),
+            (
+                "Appearance & identity",
+                vec![
+                    ("team", team_name(p.team)),
+                    ("gender", gender_name(p.gender)),
+                    (
+                        "hair style / dye",
+                        format!("{} / {}", p.hair_style, p.hair_dye),
+                    ),
+                    ("hide visual", format!("{:#06x}", p.hide_visual)),
+                ],
+            ),
+        ];
+        for (title, rows) in groups {
+            ui.label(RichText::new(title).strong());
+            egui::Grid::new(title)
+                .num_columns(2)
+                .spacing([18.0, 4.0])
+                .show(ui, |ui| {
+                    for (k, v) in rows {
+                        ui.label(RichText::new(k).weak());
+                        ui.label(v);
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(10.0);
+        }
     }
 
     // ------------------------------------------------------------ slot grid
@@ -2237,6 +2280,41 @@ fn group_of(path: &std::path::Path) -> String {
     "Local".to_string()
 }
 
+/// Human duration for the header tab: `2 h 05 min`, `12 min 03 s`, `45 s`.
+fn duration_label(seconds: u64) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if h > 0 {
+        format!("{h} h {m:02} min")
+    } else if m > 0 {
+        format!("{m} min {s:02} s")
+    } else {
+        format!("{s} s")
+    }
+}
+
+/// Team id → the colour the game shows, with the raw id kept for unknown values.
+fn team_name(team: u8) -> String {
+    match team {
+        0 => "none".to_string(),
+        1 => "red".to_string(),
+        2 => "green".to_string(),
+        3 => "blue".to_string(),
+        4 => "yellow".to_string(),
+        5 => "pink".to_string(),
+        other => format!("unknown ({other})"),
+    }
+}
+
+fn gender_name(gender: u8) -> String {
+    match gender {
+        0 => "male".to_string(),
+        1 => "female".to_string(),
+        other => format!("unknown ({other})"),
+    }
+}
+
 fn difficulty_name(d: u8) -> &'static str {
     match d {
         0 => "Classic",
@@ -2244,5 +2322,26 @@ fn difficulty_name(d: u8) -> &'static str {
         2 => "Master",
         3 => "Creative (Journey)",
         _ => "Classic",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_are_readable() {
+        assert_eq!(duration_label(0), "0 s");
+        assert_eq!(duration_label(45), "45 s");
+        assert_eq!(duration_label(125), "2 min 05 s");
+        assert_eq!(duration_label(2 * 3600 + 2 * 60), "2 h 02 min");
+    }
+
+    #[test]
+    fn unknown_enum_values_keep_their_number() {
+        assert_eq!(team_name(3), "blue");
+        assert_eq!(team_name(9), "unknown (9)");
+        assert_eq!(gender_name(1), "female");
+        assert_eq!(gender_name(7), "unknown (7)");
     }
 }

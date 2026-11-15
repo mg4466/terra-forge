@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         "inventory" => run(paths, cmd_inventory),
         "copy" => run(paths, cmd_copy),
         "selftest" => run(paths, cmd_selftest),
+        "demo" => run(paths, cmd_demo),
         "-h" | "--help" | "help" => {
             usage();
             ExitCode::SUCCESS
@@ -45,7 +46,8 @@ fn usage() {
          \x20 verify     prove decrypt->parse->serialise->encrypt is byte-identical\n\
          \x20 inventory  list non-empty inventory/equipment slots\n\
          \x20 copy       load and save to <file>.roundtrip via the GUI save path\n\
-         \x20 selftest   apply a set of edits, save, reload and assert the edits stuck"
+         \x20 selftest   apply a set of edits, save, reload and assert the edits stuck\n\
+         \x20 demo       write a fresh demo character (safe sandbox, no real save touched)"
     );
 }
 
@@ -157,6 +159,66 @@ fn cmd_verify(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a synthetic player file so the editor can be tried (and screenshotted)
+/// without touching a real save.
+fn cmd_demo(path: &Path) -> Result<(), String> {
+    use terra_core::Slot;
+
+    let mut p = terra_core::PlayerFile::new_v326("Demo Character");
+    p.difficulty = 0;
+    p.health_max = 400;
+    p.health_now = 400;
+    p.mana_max = 200;
+    p.mana_now = 200;
+    p.extra_accessory = true;
+    p.hair_style = 15;
+
+    // A plausible endgame loadout: Solar Flare armour, wings, boots, shield.
+    let armour = [(2763, 0), (2764, 0), (2765, 0)];
+    for (i, (id, prefix)) in armour.iter().enumerate() {
+        p.active_loadout.items[i] = Slot::new(*id, 1, *prefix);
+    }
+    let accessories = [
+        (1866, 4),
+        (1583, 4),
+        (5001, 4),
+        (3090, 4),
+        (1326, 4),
+        (3333, 4),
+        (4989, 4),
+    ];
+    for (i, (id, prefix)) in accessories.iter().enumerate() {
+        p.active_loadout.items[3 + i] = Slot::new(*id, 1, *prefix);
+    }
+
+    // Starter-friendly inventory.
+    let items: [(i32, i32, u8); 8] = [
+        (4956, 1, 82), // Zenith, Legendary
+        (3063, 1, 82), // Meowmere
+        (3124, 1, 0),  // Cell Phone
+        (1326, 1, 0),  // Rod of Discord
+        (2, 9999, 0),  // Dirt Block
+        (8, 999, 0),   // Torch
+        (499, 30, 0),  // Greater Healing Potion
+        (73, 100, 0),  // Gold Coin
+    ];
+    for (i, (id, stack, prefix)) in items.iter().enumerate() {
+        p.inventory[i] = Slot::new(*id, *stack, *prefix);
+    }
+    p.inventory[0].favorited = true;
+
+    if path.exists() {
+        return Err(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        ));
+    }
+    terra_core::save_with_backup(path, &p).map_err(|e| format!("save: {e}"))?;
+    println!("   wrote demo character to {}", path.display());
+    println!("   open it with:  terra-forge {}", path.display());
+    Ok(())
+}
+
 fn cmd_inventory(path: &Path) -> Result<(), String> {
     let p = load(path)?;
     let db = terra_assets::ItemDb::embedded();
@@ -181,6 +243,9 @@ fn cmd_inventory(path: &Path) -> Result<(), String> {
     collect(&mut rows, "safe", &p.safe);
     collect(&mut rows, "forge", &p.forge);
     collect(&mut rows, "void", &p.void_bag);
+    collect(&mut rows, "armor", &p.active_loadout.items);
+    collect(&mut rows, "vanity", &p.active_loadout.social);
+    collect(&mut rows, "dyes", &p.active_loadout.dyes);
     for l in 0..3 {
         collect(
             &mut rows,

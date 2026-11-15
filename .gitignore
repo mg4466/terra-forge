@@ -2,3 +2,6 @@
 **/*.plr.bak
 **/*.edited.plr
 **/*.roundtrip.plr
+/SPEC.md
+/issues.md
+/notes/

@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn dotnet_string_prefixes() {
-        let cases = ["", "a", "Testguy", &"x".repeat(300)];
+        let cases = ["", "a", "TestPlayer", &"x".repeat(300)];
         for s in cases {
             let mut w = Writer::new();
             w.string(s);

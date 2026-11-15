@@ -159,8 +159,8 @@ cargo build --release
 ## Limitations
 
 * No `.tplr` (tModLoader) support; those files are a different, older format.
-* One character at a time — no side-by-side transfer pane.
-* Journey-mode creative powers are preserved but not editable; research is read-only.
+* Journey-mode creative powers are preserved but not editable; research is editable per
+  item or in bulk.
 * Editing a character that the game currently has open will be overwritten by the game.
 * Sprites need an installed copy of Terraria. It is looked for in the standard Steam, GOG
   and tModLoader locations; set `TFORGE_CONTENT=/path/to/Content/Images` if yours is

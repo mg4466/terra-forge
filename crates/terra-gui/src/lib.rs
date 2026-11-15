@@ -319,6 +319,14 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
+        if let Some(stash) = &self.stash {
+            if same_file(&path, &stash.path) {
+                // Both panes are editable buffers over the same file; two copies
+                // would overwrite each other on save.
+                self.set_status("Character is already open in the other pane.", true);
+                return;
+            }
+        }
         match terra_core::load(&path) {
             Ok(p) => {
                 self.set_status(
@@ -373,6 +381,12 @@ impl App {
     /// automatically: silently opening somebody else's character as a stash
     /// would be a surprising thing for a file editor to do.
     fn open_stash(&mut self, path: PathBuf) {
+        if let Some(current) = &self.path {
+            if same_file(&path, current) {
+                self.set_status("Character is already open in the other pane.", true);
+                return;
+            }
+        }
         match terra_core::load(&path) {
             Ok(player) => {
                 let name = player.name.clone();
@@ -441,12 +455,21 @@ impl App {
                 if let (Some(p), Some(s)) = (self.player.as_mut(), self.stash.as_mut()) {
                     operations::transfer_item(db, p, &mut s.player, to, drag.from, drag.item);
                     s.dirty = true;
+                    // A move returns the stash's displaced item to the primary
+                    // slot, so the hero's file changed too. A copy (from: None)
+                    // only touches the destination.
+                    if drag.from.is_some() {
+                        self.dirty = true;
+                    }
                 }
             }
             (Side::Stash, Side::Primary) => {
                 if let (Some(s), Some(p)) = (self.stash.as_mut(), self.player.as_mut()) {
                     operations::transfer_item(db, &mut s.player, p, to, drag.from, drag.item);
                     self.dirty = true;
+                    if drag.from.is_some() {
+                        s.dirty = true;
+                    }
                 }
             }
         }
@@ -563,6 +586,12 @@ impl eframe::App for App {
 
         if ctrl && ctx.input(|i| i.key_pressed(egui::Key::S)) {
             self.save();
+            // Ctrl+S means "save my work", not "save the left pane". If the
+            // stash has edits, write it too — otherwise a transfer looks saved
+            // until the stash is closed.
+            if self.stash.as_ref().is_some_and(|s| s.dirty) {
+                self.save_stash();
+            }
         }
         // Ctrl+O re-scans before opening: the character may have been created
         // since the last scan, and that is exactly when someone reaches for it.
@@ -2034,8 +2063,11 @@ impl App {
     }
 
     /// Paint the item being dragged under the pointer.
-    fn drag_ghost(&self, ctx: &egui::Context) {
-        let Some(drag) = &self.drag else { return };
+    ///
+    /// `&mut self` because the sprite cache decodes lazily: a ghost is often the
+    /// first time a given item's texture is asked for.
+    fn drag_ghost(&mut self, ctx: &egui::Context) {
+        let Some(drag) = self.drag else { return };
         let Some(pos) = ctx.pointer_interact_pos() else {
             return;
         };
@@ -2051,25 +2083,47 @@ impl App {
             .map(|i| i.rarity)
             .unwrap_or(0);
         painter.rect_filled(rect, 4.0, rarity_color(rarity).linear_multiply(0.9));
+
+        // Same rules as a slot: real art when available, initials otherwise, and
+        // an integer 2x for tiny sprites so a coin does not vanish under the
+        // cursor. `frame_size` keeps animated strips at their proper size.
+        let sprite = if self.settings.sprites {
+            self.sprites.get(ctx, drag.item.net_id)
+        } else {
+            None
+        };
+        match sprite {
+            Some(texture) => {
+                let native = texture.frame_size();
+                let fit = (size - 8.0) / native.x.max(native.y);
+                let scale = if fit >= 2.0 { 2.0 } else { fit.min(1.0) };
+                let target = egui::Rect::from_center_size(rect.center(), native * scale);
+                painter.image(texture.handle.id(), target, texture.uv, Color32::WHITE);
+            }
+            None => {
+                let initials: String = self
+                    .db
+                    .display_name(drag.item.net_id)
+                    .split_whitespace()
+                    .take(2)
+                    .map(|w| w.chars().next().unwrap_or('?'))
+                    .collect();
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    initials,
+                    egui::FontId::proportional(size * 0.3),
+                    Color32::from_black_alpha(210),
+                );
+            }
+        }
+
+        // Border last so it sits on top of the artwork.
         painter.rect_stroke(
             rect,
             4.0,
             Stroke::new(1.0, Color32::from_white_alpha(160)),
             egui::StrokeKind::Inside,
-        );
-        let initials: String = self
-            .db
-            .display_name(drag.item.net_id)
-            .split_whitespace()
-            .take(2)
-            .map(|w| w.chars().next().unwrap_or('?'))
-            .collect();
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            initials,
-            egui::FontId::proportional(size * 0.3),
-            Color32::from_black_alpha(210),
         );
     }
 
@@ -2259,6 +2313,18 @@ enum MenuAction {
     Clear,
 }
 
+/// Do two paths point at the same file?
+///
+/// `canonicalize` resolves symlinks, `./` and case-insensitive filesystems; when
+/// either side does not exist (a path typed for a new file) fall back to a plain
+/// comparison, which matches what the user actually typed.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// Friendly heading for a player's directory.
 fn group_of(path: &std::path::Path) -> String {
     let dir = path
@@ -2343,5 +2409,25 @@ mod tests {
         assert_eq!(team_name(9), "unknown (9)");
         assert_eq!(gender_name(1), "female");
         assert_eq!(gender_name(7), "unknown (7)");
+    }
+
+    #[test]
+    fn same_file_sees_through_dots_and_distinguishes_files() {
+        let dir = std::env::temp_dir().join("tforge-same-file-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.plr");
+        let b = dir.join("b.plr");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+
+        assert!(same_file(&a, &a));
+        assert!(same_file(&a, &dir.join(".").join("a.plr")));
+        assert!(!same_file(&a, &b));
+        // A path that does not exist yet still compares by spelling.
+        let missing = dir.join("new.plr");
+        assert!(same_file(&missing, &missing));
+        assert!(!same_file(&missing, &a));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

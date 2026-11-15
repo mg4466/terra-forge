@@ -69,9 +69,11 @@ pub struct Sprite {
 }
 
 impl Sprite {
-    /// Longest side, used to decide whether the sprite needs shrinking.
+    /// Longest side of one *frame*, used to decide whether the sprite needs
+    /// shrinking. Measuring the raw texture height would treat a 4-frame soul
+    /// strip as four times taller than it draws, and shrink it to nothing.
     pub fn longest_side(&self) -> u32 {
-        self.width.max(self.height)
+        self.width.max(self.frame_height())
     }
 
     /// How many animation frames are stacked vertically in this texture.
@@ -336,6 +338,11 @@ mod tests {
         };
         assert_eq!(strip.frames(), 4);
         assert_eq!(strip.frame_height(), 22);
+        assert_eq!(
+            strip.longest_side(),
+            22,
+            "measured per frame, not per strip"
+        );
 
         let still = Sprite {
             width: 48,

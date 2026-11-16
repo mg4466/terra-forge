@@ -6,7 +6,7 @@ without the game running.
 
 ![terra-forge editing a character](docs/screenshot.png)
 
-Terraria's own character files are encrypted and versioned; most editors are web toys or
+Terraria's own character files are encrypted and versioned; most editors are web oriented or
 Windows-only. This one is a real desktop app, opens the modern format (1.4.4.9 and
 1.4.5.x), and is built around a single rule: **it will not write a file it cannot prove it
 can reproduce byte for byte.**
